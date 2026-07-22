@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import "./App.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000/api";
@@ -12,14 +16,20 @@ function getUsername() {
   return localStorage.getItem("auth_username") || "";
 }
 
-function setAuth(token, username) {
+function getIsAdmin() {
+  return localStorage.getItem("auth_is_admin") === "true";
+}
+
+function setAuth(token, username, isAdmin = false) {
   localStorage.setItem("auth_token", token);
   localStorage.setItem("auth_username", username);
+  localStorage.setItem("auth_is_admin", isAdmin ? "true" : "false");
 }
 
 function clearAuth() {
   localStorage.removeItem("auth_token");
   localStorage.removeItem("auth_username");
+  localStorage.removeItem("auth_is_admin");
 }
 
 function authHeaders() {
@@ -59,6 +69,11 @@ const ICONS = {
       <path d="M9 17h6" />
     </>
   ),
+  chat: (
+    <>
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </>
+  ),
   check: (
     <>
       <path d="m5 12 4 4L19 6" />
@@ -90,10 +105,22 @@ const ICONS = {
       <path d="M5 20h14" />
     </>
   ),
+  edit: (
+    <>
+      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+    </>
+  ),
   folder: (
     <>
       <path d="M3 7h6l2 2h10v9a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3z" />
       <path d="M3 7V6a3 3 0 0 1 3-3h3l2 2h5a3 3 0 0 1 3 3v1" />
+    </>
+  ),
+  plus: (
+    <>
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
     </>
   ),
   refresh: (
@@ -156,6 +183,23 @@ const ICONS = {
       <path d="M18.36 5.64l1.42-1.42" />
     </>
   ),
+  mic: (
+    <>
+      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" x2="12" y1="19" y2="22" />
+    </>
+  ),
+  micOff: (
+    <>
+      <line x1="2" x2="22" y1="2" y2="22" />
+      <path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2" />
+      <path d="M5 10v2a7 7 0 0 0 12 5.29" />
+      <path d="M15 9.34V5a3 3 0 0 0-5.68-1.33" />
+      <path d="M9 9v3a3 3 0 0 0 5.12 2.12" />
+      <line x1="12" x2="12" y1="19" y2="22" />
+    </>
+  ),
 };
 
 function Icon({ name, size = 18 }) {
@@ -202,165 +246,219 @@ function isGlobalSearchOffer(text) {
   return /do you want me to search globally outside the pdfs/i.test(text || "");
 }
 
-function renderInlineText(text) {
-  const parts = String(text || "").split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
-
-  return parts.map((part, index) => {
-    if (!part) return null;
-
-    if (part.startsWith("**") && part.endsWith("**")) {
-      return <strong key={index}>{part.slice(2, -2)}</strong>;
-    }
-
-    if (part.startsWith("`") && part.endsWith("`")) {
-      return <code key={index}>{part.slice(1, -1)}</code>;
-    }
-
-    return <span key={index}>{part}</span>;
-  });
+function extractText(children) {
+  if (typeof children === "string") return children;
+  if (Array.isArray(children)) return children.map(extractText).join("");
+  if (children?.props?.children) return extractText(children.props.children);
+  return "";
 }
 
-function parseAnswerBlocks(text) {
-  const lines = String(text || "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const blocks = [];
-  let index = 0;
+function applyHighlightsToDOM(container, highlights) {
+  if (!container || !highlights || highlights.length === 0) return;
 
-  while (index < lines.length) {
-    const line = lines[index];
-    const qaMatch = line.match(/^\d+\.\s*Q:\s*(.+)$/i);
+  // Remove existing highlights first
+  container.querySelectorAll("mark.highlight").forEach((mark) => {
+    const parent = mark.parentNode;
+    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+    parent.removeChild(mark);
+    parent.normalize();
+  });
 
-    if (qaMatch) {
-      const answerLine = lines[index + 1]?.match(/^A:\s*(.+)$/i);
-      blocks.push({
-        type: "qa",
-        question: qaMatch[1],
-        answer: answerLine ? answerLine[1] : "",
-      });
-      index += answerLine ? 2 : 1;
-      continue;
-    }
+  // Sort by length descending so longer matches are applied first
+  const sorted = [...highlights].sort((a, b) => b.text.length - a.text.length);
 
-    if (/^[-*]\s+/.test(line)) {
-      const items = [];
-      while (index < lines.length && /^[-*]\s+/.test(lines[index])) {
-        items.push(lines[index].replace(/^[-*]\s+/, ""));
-        index += 1;
+  for (const h of sorted) {
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
+    const nodesToProcess = [];
+    let node;
+    while ((node = walker.nextNode())) {
+      // Skip nodes inside code blocks or already-highlighted marks
+      if (node.parentElement?.closest("pre, code, mark.highlight")) continue;
+      if (node.textContent.toLowerCase().includes(h.text.toLowerCase())) {
+        nodesToProcess.push(node);
       }
-      blocks.push({ type: "bullets", items });
-      continue;
     }
 
-    const headingMatch = line.match(/^#{1,3}\s+(.+)$/);
-    if (headingMatch) {
-      blocks.push({ type: "heading", text: headingMatch[1] });
-      index += 1;
-      continue;
-    }
+    for (const textNode of nodesToProcess) {
+      const text = textNode.textContent;
+      const regex = new RegExp(`(${h.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi");
+      const parts = text.split(regex);
+      if (parts.length <= 1) continue;
 
-    if (/not found in uploaded pdfs/i.test(line)) {
-      blocks.push({ type: "notice", text: line });
-      index += 1;
-      continue;
+      const fragment = document.createDocumentFragment();
+      for (const part of parts) {
+        if (regex.test(part)) {
+          regex.lastIndex = 0;
+          const mark = document.createElement("mark");
+          mark.className = `highlight highlight-${h.color || "yellow"}`;
+          mark.textContent = part;
+          fragment.appendChild(mark);
+        } else {
+          fragment.appendChild(document.createTextNode(part));
+        }
+        regex.lastIndex = 0;
+      }
+      textNode.parentNode.replaceChild(fragment, textNode);
     }
-
-    const paragraph = [line];
-    index += 1;
-    while (
-      index < lines.length &&
-      !/^[-*]\s+/.test(lines[index]) &&
-      !/^\d+\.\s*Q:/i.test(lines[index]) &&
-      !/^#{1,3}\s+/.test(lines[index]) &&
-      !/not found in uploaded pdfs/i.test(lines[index])
-    ) {
-      paragraph.push(lines[index]);
-      index += 1;
-    }
-    blocks.push({ type: "paragraph", text: paragraph.join(" ") });
   }
-
-  return blocks;
 }
 
 function FormattedAnswer({
   text,
+  highlights = [],
+  onAddHighlight,
+  onRemoveHighlight,
   showGlobalActions = false,
   globalSearching = false,
   onGlobalSearch,
   onDismissGlobalSearch,
 }) {
-  const blocks = parseAnswerBlocks(text);
+  if (!text) return null;
 
-  if (!blocks.length) {
-    return null;
-  }
+  const isNotFound = /not found in uploaded pdfs/i.test(text);
+  const [selectionPopup, setSelectionPopup] = useState(null);
+  const contentRef = useRef(null);
+
+  // Apply highlights to DOM after render
+  useEffect(() => {
+    if (contentRef.current) {
+      applyHighlightsToDOM(contentRef.current, highlights);
+    }
+  }, [text, highlights]);
+
+  // Dismiss popup on click outside
+  useEffect(() => {
+    if (!selectionPopup) return;
+    const handleClickOutside = () => {
+      setTimeout(() => {
+        const sel = window.getSelection();
+        if (!sel || !sel.toString().trim()) {
+          setSelectionPopup(null);
+        }
+      }, 10);
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [selectionPopup]);
+
+  const handleMouseUp = (e) => {
+    if (!onAddHighlight) return;
+    const selection = window.getSelection();
+    const selectedText = selection?.toString().trim();
+    if (!selectedText || selectedText.length < 3) {
+      setSelectionPopup(null);
+      return;
+    }
+    // Check selection is within this component
+    const container = e.currentTarget;
+    if (!selection.anchorNode || !container.contains(selection.anchorNode)) {
+      setSelectionPopup(null);
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    const rect = range.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    setSelectionPopup({
+      text: selectedText,
+      top: rect.top - containerRect.top - 40,
+      left: Math.min(
+        Math.max(rect.left - containerRect.left + rect.width / 2, 60),
+        containerRect.width - 60
+      ),
+    });
+  };
+
+  const handleHighlight = (color) => {
+    if (selectionPopup && onAddHighlight) {
+      onAddHighlight(selectionPopup.text, color);
+      window.getSelection()?.removeAllRanges();
+      setSelectionPopup(null);
+    }
+  };
+
+  const hasHighlights = highlights && highlights.length > 0;
 
   return (
-    <div className="formatted-answer">
-      {blocks.map((block, index) => {
-        if (block.type === "heading") {
-          return <h3 key={index}>{renderInlineText(block.text)}</h3>;
-        }
-
-        if (block.type === "bullets") {
-          return (
-            <ul key={index}>
-              {block.items.map((item, itemIndex) => (
-                <li key={itemIndex}>{renderInlineText(item)}</li>
-              ))}
-            </ul>
-          );
-        }
-
-        if (block.type === "qa") {
-          return (
-            <section key={index} className="qa-card">
-              <div className="qa-label">Q{index + 1}</div>
-              <div className="qa-content">
-                <h3>{renderInlineText(block.question)}</h3>
-                {block.answer && <p>{renderInlineText(block.answer)}</p>}
-              </div>
-            </section>
-          );
-        }
-
-        if (block.type === "notice") {
-          return (
-            <div key={index} className="answer-notice-block">
-              <div className="answer-notice">
-                <Icon name="search" size={16} />
-                <span>{renderInlineText(block.text)}</span>
-              </div>
-              {showGlobalActions && (
-                <div className="global-action-row" aria-label="Global search options">
-                  <button
-                    type="button"
-                    className="global-search-button"
-                    onClick={onGlobalSearch}
-                    disabled={globalSearching}
-                  >
-                    <Icon name="search" size={15} />
-                    <span>{globalSearching ? "Searching" : "Search globally"}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="global-dismiss-button"
-                    onClick={onDismissGlobalSearch}
-                    disabled={globalSearching}
-                  >
-                    <Icon name="close" size={15} />
-                    <span>No</span>
-                  </button>
+    <div className="formatted-answer" onMouseUp={handleMouseUp}>
+      {selectionPopup && (
+        <div
+          className="highlight-popup"
+          style={{ top: selectionPopup.top, left: selectionPopup.left }}
+        >
+          <button type="button" className="hl-btn hl-yellow" onClick={() => handleHighlight("yellow")} title="Yellow" />
+          <button type="button" className="hl-btn hl-green" onClick={() => handleHighlight("green")} title="Green" />
+          <button type="button" className="hl-btn hl-blue" onClick={() => handleHighlight("blue")} title="Blue" />
+          <button type="button" className="hl-btn hl-pink" onClick={() => handleHighlight("pink")} title="Pink" />
+        </div>
+      )}
+      <div ref={contentRef}>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            code({ node, className, children, ...props }) {
+              const match = /language-(\w+)/.exec(className || "");
+              const inline = !match && !String(children).includes("\n");
+              return !inline ? (
+                <SyntaxHighlighter
+                  style={oneDark}
+                  language={match ? match[1] : "text"}
+                  PreTag="div"
+                  customStyle={{ borderRadius: "8px", fontSize: "0.85rem" }}
+                >
+                  {String(children).replace(/\n$/, "")}
+                </SyntaxHighlighter>
+              ) : (
+                <code className="inline-code" {...props}>
+                  {children}
+                </code>
+              );
+            },
+            table({ children }) {
+              return (
+                <div className="table-wrapper">
+                  <table>{children}</table>
                 </div>
-              )}
-            </div>
-          );
-        }
+              );
+            },
+          }}
+        >
+          {text}
+        </ReactMarkdown>
+      </div>
 
-        return <p key={index}>{renderInlineText(block.text)}</p>;
-      })}
+      {hasHighlights && onRemoveHighlight && (
+        <div className="highlight-chips">
+          {highlights.map((h, i) => (
+            <span key={i} className={`highlight-chip highlight-${h.color || "yellow"}`}>
+              {h.text.length > 30 ? h.text.slice(0, 30) + "…" : h.text}
+              <button type="button" onClick={() => onRemoveHighlight(h.text)} title="Remove highlight">×</button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {isNotFound && showGlobalActions && (
+        <div className="global-action-row" aria-label="Global search options">
+          <button
+            type="button"
+            className="global-search-button"
+            onClick={onGlobalSearch}
+            disabled={globalSearching}
+          >
+            <Icon name="search" size={15} />
+            <span>{globalSearching ? "Searching" : "Search globally"}</span>
+          </button>
+          <button
+            type="button"
+            className="global-dismiss-button"
+            onClick={onDismissGlobalSearch}
+            disabled={globalSearching}
+          >
+            <Icon name="close" size={15} />
+            <span>No</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -409,16 +507,123 @@ async function readChatStream(response, onEvent) {
 }
 
 function AuthScreen({ onAuth }) {
-  const [mode, setMode] = useState("login");
+  const [mode, setMode] = useState("login"); // login, register, forgot, otp, reset
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [otp, setOtp] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    if (mode === "forgot") {
+      if (!email.trim()) {
+        setError("Email is required");
+        return;
+      }
+      setLoading(true);
+      setError("");
+      setSuccess("");
+      try {
+        const res = await fetch(`${API_BASE}/auth/forgot-password/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: email.trim() }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setError(data.error || "Something went wrong");
+          return;
+        }
+        setSuccess("OTP sent to your email. Check your inbox.");
+        setMode("otp");
+      } catch {
+        setError("Cannot connect to the server");
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    if (mode === "otp") {
+      if (!otp.trim()) {
+        setError("Please enter the OTP");
+        return;
+      }
+      setLoading(true);
+      setError("");
+      setSuccess("");
+      try {
+        const res = await fetch(`${API_BASE}/auth/verify-otp/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: email.trim(), otp: otp.trim() }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setError(data.error || "Invalid OTP");
+          return;
+        }
+        setSuccess("OTP verified. Set your new password.");
+        setMode("reset");
+      } catch {
+        setError("Cannot connect to the server");
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    if (mode === "reset") {
+      if (!newPassword.trim()) {
+        setError("New password is required");
+        return;
+      }
+      if (newPassword !== confirmNewPassword) {
+        setError("Passwords do not match");
+        return;
+      }
+      if (newPassword.length < 6) {
+        setError("Password must be at least 6 characters");
+        return;
+      }
+      setLoading(true);
+      setError("");
+      setSuccess("");
+      try {
+        const res = await fetch(`${API_BASE}/auth/reset-password/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: email.trim(), otp: otp.trim(), new_password: newPassword.trim() }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setError(data.error || "Something went wrong");
+          return;
+        }
+        setSuccess(data.message || "Password reset successful!");
+        setOtp("");
+        setNewPassword("");
+        setConfirmNewPassword("");
+        setTimeout(() => {
+          setMode("login");
+          setSuccess("");
+        }, 2000);
+      } catch {
+        setError("Cannot connect to the server");
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    // login / register flow
     if (!email.trim() || !password.trim()) return;
 
     if (mode === "register") {
@@ -460,13 +665,28 @@ function AuthScreen({ onAuth }) {
         return;
       }
 
-      setAuth(data.token, data.username);
+      setAuth(data.token, data.username, data.is_admin);
       onAuth(data.username);
     } catch (err) {
       setError("Cannot connect to the server");
     } finally {
       setLoading(false);
     }
+  };
+
+  const getTitle = () => {
+    if (mode === "forgot") return "Forgot Password";
+    if (mode === "otp") return "Enter OTP";
+    if (mode === "reset") return "Reset Password";
+    return mode === "login" ? "Sign in" : "Create account";
+  };
+
+  const getSubmitLabel = () => {
+    if (loading) return "Please wait...";
+    if (mode === "forgot") return "Send OTP";
+    if (mode === "otp") return "Verify OTP";
+    if (mode === "reset") return "Reset Password";
+    return mode === "login" ? "Sign in" : "Register";
   };
 
   return (
@@ -484,9 +704,10 @@ function AuthScreen({ onAuth }) {
         </div>
 
         <form className="auth-form" onSubmit={handleSubmit}>
-          <h2>{mode === "login" ? "Sign in" : "Create account"}</h2>
+          <h2>{getTitle()}</h2>
 
           {error && <div className="auth-error">{error}</div>}
+          {success && <div className="auth-success">{success}</div>}
 
           {mode === "register" && (
             <label>
@@ -502,29 +723,33 @@ function AuthScreen({ onAuth }) {
             </label>
           )}
 
-          <label>
-            <span>Email</span>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              autoComplete="email"
-              disabled={loading}
-              placeholder="you@example.com"
-            />
-          </label>
+          {(mode === "login" || mode === "register" || mode === "forgot") && (
+            <label>
+              <span>Email</span>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                autoComplete="email"
+                disabled={loading || mode === "otp" || mode === "reset"}
+                placeholder="you@example.com"
+              />
+            </label>
+          )}
 
-          <label>
-            <span>Password</span>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
-              disabled={loading}
-              placeholder="••••••••"
-            />
-          </label>
+          {(mode === "login" || mode === "register") && (
+            <label>
+              <span>Password</span>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete={mode === "login" ? "current-password" : "new-password"}
+                disabled={loading}
+                placeholder="••••••••"
+              />
+            </label>
+          )}
 
           {mode === "register" && (
             <label>
@@ -540,21 +765,98 @@ function AuthScreen({ onAuth }) {
             </label>
           )}
 
+          {mode === "otp" && (
+            <label>
+              <span>OTP Code</span>
+              <input
+                type="text"
+                value={otp}
+                onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                disabled={loading}
+                placeholder="Enter 6-digit OTP"
+                maxLength={6}
+                inputMode="numeric"
+              />
+            </label>
+          )}
+
+          {mode === "reset" && (
+            <>
+              <label>
+                <span>New Password</span>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  autoComplete="new-password"
+                  disabled={loading}
+                  placeholder="••••••••"
+                />
+              </label>
+              <label>
+                <span>Confirm New Password</span>
+                <input
+                  type="password"
+                  value={confirmNewPassword}
+                  onChange={(e) => setConfirmNewPassword(e.target.value)}
+                  autoComplete="new-password"
+                  disabled={loading}
+                  placeholder="••••••••"
+                />
+              </label>
+            </>
+          )}
+
           <button type="submit" className="auth-submit" disabled={loading}>
-            {loading ? "Please wait..." : mode === "login" ? "Sign in" : "Register"}
+            {getSubmitLabel()}
           </button>
 
+          {mode === "login" && (
+            <p className="auth-forgot">
+              <button
+                type="button"
+                onClick={() => {
+                  setMode("forgot");
+                  setError("");
+                  setSuccess("");
+                }}
+              >
+                Forgot password?
+              </button>
+            </p>
+          )}
+
           <p className="auth-switch">
-            {mode === "login" ? "Don't have an account?" : "Already have an account?"}{" "}
-            <button
-              type="button"
-              onClick={() => {
-                setMode(mode === "login" ? "register" : "login");
-                setError("");
-              }}
-            >
-              {mode === "login" ? "Register" : "Sign in"}
-            </button>
+            {(mode === "login" || mode === "register") && (
+              <>
+                {mode === "login" ? "Don't have an account?" : "Already have an account?"}{" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode(mode === "login" ? "register" : "login");
+                    setError("");
+                    setSuccess("");
+                  }}
+                >
+                  {mode === "login" ? "Register" : "Sign in"}
+                </button>
+              </>
+            )}
+            {(mode === "forgot" || mode === "otp" || mode === "reset") && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMode("login");
+                  setError("");
+                  setSuccess("");
+                  setOtp("");
+                  setNewPassword("");
+                  setConfirmNewPassword("");
+                }}
+              >
+                Back to Sign in
+              </button>
+            )}
           </p>
         </form>
       </div>
@@ -562,8 +864,131 @@ function AuthScreen({ onAuth }) {
   );
 }
 
+function AdminDashboard({ onBack, onLogout }) {
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const fetchStats = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/admin/dashboard/`, {
+          headers: authHeaders(),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setError(data.error || "Failed to load dashboard");
+          return;
+        }
+        setStats(data);
+      } catch {
+        setError("Cannot connect to the server");
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchStats();
+  }, []);
+
+  return (
+    <div className="admin-dashboard">
+      <header className="admin-header">
+        <div className="admin-header-left">
+          <div className="brand-mark" aria-hidden="true">
+            <span>ID</span>
+          </div>
+          <h1>Admin Dashboard</h1>
+        </div>
+        <div className="admin-header-right">
+          <button type="button" className="secondary-button" onClick={onBack}>
+            <Icon name="chat" size={16} /> Back to App
+          </button>
+          <button type="button" className="secondary-button" onClick={onLogout}>
+            Logout
+          </button>
+        </div>
+      </header>
+
+      {loading && <div className="admin-loading">Loading dashboard...</div>}
+      {error && <div className="admin-error">{error}</div>}
+
+      {stats && (
+        <>
+          <div className="admin-summary-cards">
+            <div className="admin-card">
+              <div className="admin-card-number">{stats.total_users}</div>
+              <div className="admin-card-label">Total Users</div>
+            </div>
+            <div className="admin-card">
+              <div className="admin-card-number">
+                {stats.users.reduce((sum, u) => sum + u.upload_count, 0)}
+              </div>
+              <div className="admin-card-label">Total Uploads</div>
+            </div>
+            <div className="admin-card">
+              <div className="admin-card-number">
+                {stats.users.reduce((sum, u) => sum + u.conversation_count, 0)}
+              </div>
+              <div className="admin-card-label">Total Conversations</div>
+            </div>
+            <div className="admin-card">
+              <div className="admin-card-number">
+                {stats.users.reduce((sum, u) => sum + u.message_count, 0)}
+              </div>
+              <div className="admin-card-label">Total Messages</div>
+            </div>
+          </div>
+
+          <div className="admin-table-wrapper">
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Email</th>
+                  <th>Joined</th>
+                  <th>Last Login</th>
+                  <th>Uploads</th>
+                  <th>Conversations</th>
+                  <th>Messages</th>
+                  <th>Role</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stats.users.map((u) => (
+                  <tr key={u.id}>
+                    <td className="admin-cell-name">{u.name}</td>
+                    <td>{u.email}</td>
+                    <td>{new Date(u.date_joined).toLocaleDateString()}</td>
+                    <td>{u.last_login ? new Date(u.last_login).toLocaleDateString() : "Never"}</td>
+                    <td className="admin-cell-number">{u.upload_count}</td>
+                    <td className="admin-cell-number">{u.conversation_count}</td>
+                    <td className="admin-cell-number">{u.message_count}</td>
+                    <td>
+                      <span className={`admin-badge ${u.is_admin ? "admin-badge-admin" : "admin-badge-user"}`}>
+                        {u.is_admin ? "Admin" : "User"}
+                      </span>
+                    </td>
+                    <td>
+                      <span className={`admin-badge ${u.is_active ? "admin-badge-active" : "admin-badge-inactive"}`}>
+                        {u.is_active ? "Active" : "Inactive"}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [authedUser, setAuthedUser] = useState(getUsername());
+  const [isAdmin, setIsAdmin] = useState(getIsAdmin());
+  const [showAdmin, setShowAdmin] = useState(false);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -576,13 +1001,33 @@ function App() {
   const [pendingDelete, setPendingDelete] = useState("");
   const [toast, setToast] = useState(null);
   const [darkMode, setDarkMode] = useState(() => localStorage.getItem("theme") === "dark");
+  const [conversations, setConversations] = useState([]);
+  const [activeConversation, setActiveConversation] = useState(null);
+  const [renamingConversation, setRenamingConversation] = useState(null);
+  const [renameTitle, setRenameTitle] = useState("");
   const chatScrollRef = useRef(null);
   const toastTimerRef = useRef(null);
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef(null);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", darkMode ? "dark" : "light");
     localStorage.setItem("theme", darkMode ? "dark" : "light");
   }, [darkMode]);
+
+  // Sync admin flag from server on mount
+  useEffect(() => {
+    if (!authedUser) return;
+    fetch(`${API_BASE}/auth/me/`, { headers: authHeaders() })
+      .then((res) => res.ok ? res.json() : null)
+      .then((data) => {
+        if (data && data.is_admin !== undefined) {
+          localStorage.setItem("auth_is_admin", data.is_admin ? "true" : "false");
+          setIsAdmin(data.is_admin);
+        }
+      })
+      .catch(() => {});
+  }, [authedUser]);
 
   const documents = useMemo(
     () => uploadedFiles.map(normalizeFile).sort((a, b) => a.name.localeCompare(b.name)),
@@ -642,9 +1087,111 @@ function App() {
     [showToast]
   );
 
+  // ---- Conversations API ----
+  const fetchConversations = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/conversations/`, {
+        headers: authHeaders(),
+      });
+      if (response.status === 401) return;
+      if (!response.ok) return;
+      const data = await response.json();
+      setConversations(data.conversations || []);
+    } catch (err) {
+      // silent
+    }
+  }, []);
+
+  const createConversation = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/conversations/create/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ title: "New Chat" }),
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      setConversations((prev) => [data, ...prev]);
+      setActiveConversation(data);
+      setMessages([]);
+    } catch (err) {
+      // silent
+    }
+  }, []);
+
+  const loadConversation = useCallback(async (conversation) => {
+    setActiveConversation(conversation);
+    try {
+      const response = await fetch(`${API_BASE}/conversations/${conversation.id}/`, {
+        headers: authHeaders(),
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      const loaded = (data.messages || []).map((m, i, arr) => {
+        const msg = {
+          id: m.id ? `db-${m.id}` : `loaded-${i}`,
+          dbId: m.id || null,
+          role: m.role === "user" ? "user" : "bot",
+          text: m.text,
+          sources: m.sources || [],
+          highlights: m.highlights || [],
+          streaming: false,
+          globalDismissed: true,
+        };
+        return msg;
+      });
+      setMessages(loaded);
+    } catch (err) {
+      // silent
+    }
+  }, []);
+
+  const handleRenameConversation = useCallback(async () => {
+    if (!renamingConversation || !renameTitle.trim()) {
+      setRenamingConversation(null);
+      return;
+    }
+    try {
+      const response = await fetch(`${API_BASE}/conversations/${renamingConversation.id}/rename/`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ title: renameTitle.trim() }),
+      });
+      if (!response.ok) return;
+      setConversations((prev) =>
+        prev.map((c) => (c.id === renamingConversation.id ? { ...c, title: renameTitle.trim() } : c))
+      );
+      if (activeConversation?.id === renamingConversation.id) {
+        setActiveConversation((prev) => ({ ...prev, title: renameTitle.trim() }));
+      }
+    } catch (err) {
+      // silent
+    }
+    setRenamingConversation(null);
+  }, [renamingConversation, renameTitle, activeConversation]);
+
+  const handleDeleteConversation = useCallback(async (conversationId) => {
+    try {
+      const response = await fetch(`${API_BASE}/conversations/${conversationId}/delete/`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      if (!response.ok) return;
+      setConversations((prev) => prev.filter((c) => c.id !== conversationId));
+      if (activeConversation?.id === conversationId) {
+        setActiveConversation(null);
+        setMessages([]);
+      }
+      showToast("Conversation deleted.", "success");
+    } catch (err) {
+      // silent
+    }
+  }, [activeConversation, showToast]);
+
   useEffect(() => {
     const initialRefresh = window.setTimeout(() => {
       fetchUploadedFiles();
+      fetchConversations();
     }, 0);
     const interval = window.setInterval(() => {
       fetchUploadedFiles({ silent: true });
@@ -654,7 +1201,7 @@ function App() {
       window.clearTimeout(initialRefresh);
       window.clearInterval(interval);
     };
-  }, [fetchUploadedFiles]);
+  }, [fetchUploadedFiles, fetchConversations]);
 
   useEffect(() => {
     if (!loading) {
@@ -730,7 +1277,28 @@ function App() {
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_BASE}/chat-stream/?query=${encodeURIComponent(scopedQuestion)}`, {
+      // Auto-create conversation if none is active
+      let currentConversation = activeConversation;
+      if (!currentConversation) {
+        try {
+          const createRes = await fetch(`${API_BASE}/conversations/create/`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({ title: "New Chat" }),
+          });
+          if (createRes.ok) {
+            const convData = await createRes.json();
+            currentConversation = convData;
+            setActiveConversation(convData);
+            setConversations((prev) => [convData, ...prev]);
+          }
+        } catch (err) {
+          // Continue without saving if creation fails
+        }
+      }
+
+      const convParam = currentConversation ? `&conversation_id=${currentConversation.id}` : "";
+      const response = await fetch(`${API_BASE}/chat-stream/?query=${encodeURIComponent(scopedQuestion)}${convParam}`, {
         headers: authHeaders(),
       });
       if (response.status === 401) {
@@ -795,6 +1363,8 @@ function App() {
       setLoading(false);
       setThinkingStage(0);
       setElapsedSeconds(0);
+      // Refresh conversations to pick up title change from first message
+      fetchConversations();
     }
   };
 
@@ -976,7 +1546,11 @@ function App() {
     ]);
 
     try {
-      const response = await fetch(`${API_BASE}/global-search/?query=${encodeURIComponent(question)}`, {
+      let url = `${API_BASE}/global-search/?query=${encodeURIComponent(question)}`;
+      if (activeConversation?.id) {
+        url += `&conversation_id=${activeConversation.id}`;
+      }
+      const response = await fetch(url, {
         headers: authHeaders(),
       });
       if (!response.ok) {
@@ -1034,12 +1608,136 @@ function App() {
   const handleLogout = () => {
     clearAuth();
     setAuthedUser("");
+    setIsAdmin(false);
+    setShowAdmin(false);
     setMessages([]);
     setUploadedFiles([]);
+    setConversations([]);
+    setActiveConversation(null);
+    if (recognitionRef.current) {
+      recognitionRef.current.abort();
+      recognitionRef.current = null;
+    }
+    setIsListening(false);
   };
 
+  const toggleVoiceInput = useCallback(() => {
+    // Stop listening
+    if (isListening && recognitionRef.current) {
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
+      setIsListening(false);
+      return;
+    }
+
+    // Check browser support
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      showToast("Voice input is not supported in this browser. Try Chrome or Edge.", "error");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-US";
+    recognition.interimResults = true;
+    recognition.continuous = false;
+
+    let finalTranscript = "";
+
+    recognition.onstart = () => {
+      setIsListening(true);
+    };
+
+    recognition.onresult = (event) => {
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          finalTranscript += transcript;
+        } else {
+          interim += transcript;
+        }
+      }
+      setInput(finalTranscript + interim);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+      recognitionRef.current = null;
+    };
+
+    recognition.onerror = (event) => {
+      setIsListening(false);
+      recognitionRef.current = null;
+      if (event.error !== "aborted" && event.error !== "no-speech") {
+        showToast(`Voice error: ${event.error}`, "error");
+      }
+    };
+
+    recognitionRef.current = recognition;
+    recognition.start();
+  }, [isListening, showToast]);
+
+  const saveHighlightsToServer = useCallback(async (dbId, highlights) => {
+    if (!dbId) return;
+    const numericId = String(dbId).replace(/^db-/, "");
+    try {
+      await fetch(`${API_BASE}/messages/${numericId}/highlights/`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ highlights }),
+      });
+    } catch {
+      // silent
+    }
+  }, []);
+
+  const addHighlight = useCallback((messageId, text, color) => {
+    setMessages((prev) => {
+      const updated = prev.map((m) => {
+        if (m.id !== messageId) return m;
+        const existing = m.highlights || [];
+        // Don't add duplicate
+        if (existing.some((h) => h.text === text)) return m;
+        const newHighlights = [...existing, { text, color }];
+        // Save to server
+        if (m.dbId) saveHighlightsToServer(m.dbId, newHighlights);
+        return { ...m, highlights: newHighlights };
+      });
+      return updated;
+    });
+  }, [saveHighlightsToServer]);
+
+  const removeHighlight = useCallback((messageId, text) => {
+    setMessages((prev) => {
+      const updated = prev.map((m) => {
+        if (m.id !== messageId) return m;
+        const newHighlights = (m.highlights || []).filter((h) => h.text !== text);
+        if (m.dbId) saveHighlightsToServer(m.dbId, newHighlights);
+        return { ...m, highlights: newHighlights };
+      });
+      return updated;
+    });
+  }, [saveHighlightsToServer]);
+
   if (!authedUser) {
-    return <AuthScreen onAuth={(username) => setAuthedUser(username)} />;
+    return (
+      <AuthScreen
+        onAuth={(username) => {
+          setAuthedUser(username);
+          setIsAdmin(getIsAdmin());
+        }}
+      />
+    );
+  }
+
+  if (showAdmin && isAdmin) {
+    return (
+      <AdminDashboard
+        onBack={() => setShowAdmin(false)}
+        onLogout={handleLogout}
+      />
+    );
   }
 
   return (
@@ -1048,6 +1746,89 @@ function App() {
         <div className="brand-block">
           <div className="brand-mark" aria-hidden="true">
             <span>ID</span>
+          </div>
+        </div>
+
+        {/* Conversations Section */}
+        <div className="conversations-section">
+          <div className="conversations-header">
+            <span className="conversations-title">Chats</span>
+            <button
+              type="button"
+              className="icon-button new-chat-btn"
+              onClick={createConversation}
+              title="New Chat"
+              aria-label="New Chat"
+            >
+              <Icon name="plus" size={16} />
+            </button>
+          </div>
+          <div className="conversations-list">
+            {conversations.map((conv) => (
+              <div
+                key={conv.id}
+                className={`conversation-row ${activeConversation?.id === conv.id ? "is-active" : ""}`}
+              >
+                {renamingConversation?.id === conv.id ? (
+                  <form
+                    className="rename-form"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      handleRenameConversation();
+                    }}
+                  >
+                    <input
+                      type="text"
+                      value={renameTitle}
+                      onChange={(e) => setRenameTitle(e.target.value)}
+                      onBlur={handleRenameConversation}
+                      autoFocus
+                      className="rename-input"
+                    />
+                  </form>
+                ) : (
+                  <button
+                    type="button"
+                    className="conversation-select"
+                    onClick={() => loadConversation(conv)}
+                    title={conv.title}
+                  >
+                    <Icon name="chat" size={14} />
+                    <span className="conversation-name">{conv.title}</span>
+                  </button>
+                )}
+                <div className="conversation-actions">
+                  <button
+                    type="button"
+                    className="conv-action-btn"
+                    title="Rename"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setRenamingConversation(conv);
+                      setRenameTitle(conv.title);
+                    }}
+                  >
+                    <Icon name="edit" size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    className="conv-action-btn conv-delete-btn"
+                    title="Delete"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteConversation(conv.id);
+                    }}
+                  >
+                    <Icon name="trash" size={13} />
+                  </button>
+                </div>
+              </div>
+            ))}
+            {conversations.length === 0 && (
+              <div className="empty-conversations">
+                <small>No conversations yet</small>
+              </div>
+            )}
           </div>
         </div>
 
@@ -1184,6 +1965,11 @@ function App() {
             </button>
             <Icon name="user" size={16} />
             <span>{authedUser}</span>
+            {isAdmin && (
+              <button type="button" className="admin-button" onClick={() => setShowAdmin(true)}>
+                Admin Panel
+              </button>
+            )}
             <button type="button" className="logout-button" onClick={handleLogout}>
               Sign out
             </button>
@@ -1240,6 +2026,9 @@ function App() {
                       {message.role === "bot" && message.text ? (
                         <FormattedAnswer
                           text={message.text}
+                          highlights={message.highlights || []}
+                          onAddHighlight={(text, color) => addHighlight(message.id, text, color)}
+                          onRemoveHighlight={(text) => removeHighlight(message.id, text)}
                           showGlobalActions={
                             !message.streaming &&
                             !message.globalDismissed &&
@@ -1308,13 +2097,25 @@ function App() {
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
                 placeholder={
-                  activeDocument
-                    ? `Ask about ${compactName(activeDocument.name)}`
-                    : "Ask about your knowledge base"
+                  isListening
+                    ? "Listening..."
+                    : activeDocument
+                      ? `Ask about ${compactName(activeDocument.name)}`
+                      : "Ask about your knowledge base"
                 }
                 disabled={loading}
               />
             </div>
+            <button
+              className={`mic-button ${isListening ? "is-listening" : ""}`}
+              type="button"
+              onClick={toggleVoiceInput}
+              disabled={loading}
+              title={isListening ? "Stop listening" : "Voice input"}
+              aria-label={isListening ? "Stop listening" : "Voice input"}
+            >
+              <Icon name={isListening ? "micOff" : "mic"} size={18} />
+            </button>
             <button className="send-button" type="submit" disabled={loading || !input.trim()} title="Send">
               <Icon name="send" />
               <span className="sr-only">Send</span>

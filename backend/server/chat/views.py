@@ -10,6 +10,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.core.files.storage import FileSystemStorage
 
 from .auth_views import get_user_from_token
+from .models import Conversation, Message
 
 # ---------------- PATH SETUP ----------------
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -276,7 +277,7 @@ def _prepare_chat(query, user):
     if not store:
         return {
             "ready": False,
-            "answer": "No documents available. Please upload PDFs first.",
+            "answer": "No documents uploaded. Not found in uploaded PDFs. Do you want me to search globally outside the PDFs?",
             "sources": []
         }
 
@@ -353,8 +354,13 @@ def _user_upload_folder(user):
     return folder
 
 
+def _user_faiss_folder(user):
+    """Get FAISS index folder path for a specific user."""
+    return os.path.join(UPLOAD_ROOT, str(user.id), ".faiss_index")
+
+
 def _get_user_data(user):
-    """Get or initialize per-user store data."""
+    """Get or initialize per-user store data. Tries to load from disk first."""
     uid = user.id
     if uid not in user_stores:
         user_stores[uid] = {
@@ -362,6 +368,12 @@ def _get_user_data(user):
             "pdf_status_map": {},
             "memory": ChatMemory(max_pairs=2),
         }
+        # Try loading persisted FAISS index from disk
+        faiss_folder = _user_faiss_folder(user)
+        loaded_store = FAISSStore.load(faiss_folder)
+        if loaded_store and loaded_store.index.ntotal > 0:
+            user_stores[uid]["store"] = loaded_store
+            print(f"User {user.username}: Loaded FAISS index from disk ({loaded_store.index.ntotal} vectors).")
     return user_stores[uid]
 
 
@@ -411,9 +423,16 @@ def build_store_for_user(user):
         dimension = len(embeddings[0])
         user_data["store"] = FAISSStore(dimension)
         user_data["store"].add(embeddings, all_chunks)
-        print(f"User {user.username}: Loaded {len(doc_files)} document(s) with {len(all_chunks)} chunks.")
+        # Persist to disk
+        user_data["store"].save(_user_faiss_folder(user))
+        print(f"User {user.username}: Built & saved {len(doc_files)} document(s) with {len(all_chunks)} chunks.")
     else:
         user_data["store"] = None
+        # Remove old index if no documents left
+        faiss_folder = _user_faiss_folder(user)
+        if os.path.exists(faiss_folder):
+            import shutil
+            shutil.rmtree(faiss_folder, ignore_errors=True)
         print(f"User {user.username}: No documents found to build the store.")
 
 
@@ -512,12 +531,39 @@ def list_pdfs(request):
 
 
 # ---------------- CHAT ----------------
+def _get_or_create_conversation(user, request):
+    """Get conversation from query param or create a new one."""
+    conversation_id = request.GET.get("conversation_id")
+    if conversation_id:
+        try:
+            return Conversation.objects.get(id=int(conversation_id), user=user)
+        except (Conversation.DoesNotExist, ValueError):
+            pass
+    return None
+
+
+def _save_message(conversation, role, text, sources=None):
+    """Save a message to the conversation."""
+    if conversation:
+        Message.objects.create(
+            conversation=conversation,
+            role=role,
+            text=text,
+            sources=sources or []
+        )
+        # Auto-title: use first user message as title if still default
+        if role == "user" and conversation.title == "New Chat":
+            conversation.title = text[:100]
+            conversation.save()
+
+
 def chat_view(request):
     user = _require_auth(request)
     if not user:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
     query = request.GET.get("query")
+    conversation = _get_or_create_conversation(user, request)
     prepared = _prepare_chat(query, user)
 
     if prepared.get("error"):
@@ -545,6 +591,10 @@ def chat_view(request):
     # 🔥 Extract unique filenames
     sources = _answer_sources(answer, prepared["sources"])
 
+    # Save to conversation
+    _save_message(conversation, "user", query)
+    _save_message(conversation, "bot", answer, sources)
+
     return JsonResponse({
         "answer": answer,
         "sources": sources
@@ -557,6 +607,7 @@ def chat_stream_view(request):
         return JsonResponse({"error": "Authentication required"}, status=401)
 
     query = request.GET.get("query")
+    conversation = _get_or_create_conversation(user, request)
     prepared = _prepare_chat(query, user)
 
     if prepared.get("error"):
@@ -595,6 +646,11 @@ def chat_stream_view(request):
         answer = "".join(answer_parts).strip() or "Not found in document"
         memory.add_message("Assistant", answer)
         final_sources = _answer_sources(answer, prepared["sources"])
+
+        # Save to conversation
+        _save_message(conversation, "user", query)
+        _save_message(conversation, "bot", answer, final_sources)
+
         yield _sse({
             "type": "sources",
             "sources": final_sources
@@ -613,7 +669,19 @@ def chat_stream_view(request):
 
 def global_search_view(request):
     query = request.GET.get("query", "")
+    conversation_id = request.GET.get("conversation_id")
+
+    user = _require_auth(request)
     result = global_search(query)
+
+    # Save the global search result to the conversation if provided
+    if user and conversation_id and result.get("answer"):
+        try:
+            conversation = Conversation.objects.get(id=int(conversation_id), user=user)
+            _save_message(conversation, "bot", result["answer"], result.get("sources", []))
+        except (Conversation.DoesNotExist, ValueError, TypeError):
+            pass
+
     return JsonResponse(result)
 
 
@@ -743,3 +811,166 @@ def export_chat_pdf(request):
     response = HttpResponse(buffer.read(), content_type="application/pdf")
     response["Content-Disposition"] = 'attachment; filename="chat-export.pdf"'
     return response
+
+
+# ---------------- CONVERSATIONS ----------------
+@csrf_exempt
+def list_conversations(request):
+    user = _require_auth(request)
+    if not user:
+        return JsonResponse({"error": "Authentication required"}, status=401)
+
+    conversations = Conversation.objects.filter(user=user).values(
+        "id", "title", "created_at", "updated_at"
+    )
+    return JsonResponse({
+        "conversations": [
+            {
+                "id": c["id"],
+                "title": c["title"],
+                "created_at": c["created_at"].isoformat(),
+                "updated_at": c["updated_at"].isoformat(),
+            }
+            for c in conversations
+        ]
+    })
+
+
+@csrf_exempt
+def create_conversation(request):
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+
+    user = _require_auth(request)
+    if not user:
+        return JsonResponse({"error": "Authentication required"}, status=401)
+
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except json.JSONDecodeError:
+        body = {}
+
+    title = body.get("title", "New Chat").strip()[:200]
+    conversation = Conversation.objects.create(user=user, title=title)
+
+    return JsonResponse({
+        "id": conversation.id,
+        "title": conversation.title,
+        "created_at": conversation.created_at.isoformat(),
+        "updated_at": conversation.updated_at.isoformat(),
+    }, status=201)
+
+
+@csrf_exempt
+def get_conversation_messages(request, conversation_id):
+    user = _require_auth(request)
+    if not user:
+        return JsonResponse({"error": "Authentication required"}, status=401)
+
+    try:
+        conversation = Conversation.objects.get(id=conversation_id, user=user)
+    except Conversation.DoesNotExist:
+        return JsonResponse({"error": "Conversation not found"}, status=404)
+
+    messages = conversation.messages.values("id", "role", "text", "sources", "highlights", "created_at")
+    return JsonResponse({
+        "conversation_id": conversation.id,
+        "title": conversation.title,
+        "messages": [
+            {
+                "id": m["id"],
+                "role": m["role"],
+                "text": m["text"],
+                "sources": m["sources"],
+                "highlights": m["highlights"] or [],
+                "created_at": m["created_at"].isoformat(),
+            }
+            for m in messages
+        ]
+    })
+
+
+@csrf_exempt
+def rename_conversation(request, conversation_id):
+    if request.method != "PUT":
+        return JsonResponse({"error": "PUT required"}, status=405)
+
+    user = _require_auth(request)
+    if not user:
+        return JsonResponse({"error": "Authentication required"}, status=401)
+
+    try:
+        conversation = Conversation.objects.get(id=conversation_id, user=user)
+    except Conversation.DoesNotExist:
+        return JsonResponse({"error": "Conversation not found"}, status=404)
+
+    try:
+        body = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    title = body.get("title", "").strip()[:200]
+    if not title:
+        return JsonResponse({"error": "Title is required"}, status=400)
+
+    conversation.title = title
+    conversation.save()
+
+    return JsonResponse({"id": conversation.id, "title": conversation.title})
+
+
+@csrf_exempt
+def delete_conversation(request, conversation_id):
+    if request.method != "DELETE":
+        return JsonResponse({"error": "DELETE required"}, status=405)
+
+    user = _require_auth(request)
+    if not user:
+        return JsonResponse({"error": "Authentication required"}, status=401)
+
+    try:
+        conversation = Conversation.objects.get(id=conversation_id, user=user)
+    except Conversation.DoesNotExist:
+        return JsonResponse({"error": "Conversation not found"}, status=404)
+
+    conversation.delete()
+    return JsonResponse({"message": "Conversation deleted"})
+
+
+# ---------------- HIGHLIGHTS ----------------
+@csrf_exempt
+def update_highlights(request, message_id):
+    """Update highlights for a specific message."""
+    if request.method != "PUT":
+        return JsonResponse({"error": "PUT required"}, status=405)
+
+    user = _require_auth(request)
+    if not user:
+        return JsonResponse({"error": "Authentication required"}, status=401)
+
+    try:
+        message = Message.objects.select_related("conversation").get(
+            id=message_id, conversation__user=user
+        )
+    except Message.DoesNotExist:
+        return JsonResponse({"error": "Message not found"}, status=404)
+
+    try:
+        body = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    highlights = body.get("highlights", [])
+    # Validate: each highlight must have "text" string
+    validated = []
+    for h in highlights:
+        if isinstance(h, dict) and isinstance(h.get("text"), str) and h["text"].strip():
+            validated.append({
+                "text": h["text"],
+                "color": h.get("color", "yellow"),
+            })
+
+    message.highlights = validated
+    message.save(update_fields=["highlights"])
+
+    return JsonResponse({"highlights": message.highlights})

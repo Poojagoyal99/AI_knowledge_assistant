@@ -513,9 +513,12 @@ def build_prompt(context, question, history, source_hint=None):
 
     return f"""
 You are a PDF knowledge assistant.
-Use only the document excerpts below. Do not use outside knowledge.
-If the excerpts do not contain enough relevant information, reply exactly: {NOT_FOUND}.
-For definition questions, define a term only if the excerpts actually explain that term.
+IMPORTANT RULES:
+1. Use ONLY the document excerpts below. NEVER use outside knowledge.
+2. If the question is about a topic NOT covered in the excerpts, reply EXACTLY: {NOT_FOUND}
+3. Do NOT try to connect unrelated content to the question. If excerpts are about programming but the question is about cooking, reply: {NOT_FOUND}
+4. For definition questions, define a term only if the excerpts actually explain that term.
+5. Be strict: if the excerpts don't directly address the question, say {NOT_FOUND}
 {task_note}
 
 {source_note}Document excerpts:
@@ -552,10 +555,41 @@ def _ollama_error_message(exc):
     )
 
 
+def _context_relevance_check(context, question):
+    """Check if the retrieved context has meaningful relevance to the question.
+    Returns True if context seems relevant, False otherwise."""
+    question_terms = _content_tokens(_clean_question(question))
+    if not question_terms:
+        return True  # Can't judge, let LLM decide
+
+    context_lower = _normalize_space(_strip_source_labels(context)).lower()
+
+    # Count how many question terms appear in context
+    matched = 0
+    for term in question_terms:
+        if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", context_lower):
+            matched += 1
+
+    # If none of the meaningful question terms appear in context, it's irrelevant
+    if matched == 0:
+        return False
+
+    # If less than 30% of terms match for multi-term queries, likely irrelevant
+    if len(question_terms) >= 3 and matched / len(question_terms) < 0.3:
+        return False
+
+    return True
+
+
 def _pre_llm_guard(context, question):
     topic = _definition_topic(_clean_question(question))
     if topic and not _has_definition_support(context, topic):
         return NOT_FOUND_RESPONSE
+
+    # Relevance guard: if context doesn't relate to the question at all, reject early
+    if not _context_relevance_check(context, question):
+        return NOT_FOUND_RESPONSE
+
     return None
 
 
@@ -564,6 +598,10 @@ def _post_llm_fallback(context, question, answer):
     fallback = _extractive_fallback(context, question)
 
     if answer and not _is_not_found(answer):
+        # Final relevance check: if context isn't relevant to question, override LLM's answer
+        if not _context_relevance_check(context, question):
+            return NOT_FOUND_RESPONSE
+
         answer_lower = answer.lower()
         question_lower = question.lower()
         task = _task_type(question)
