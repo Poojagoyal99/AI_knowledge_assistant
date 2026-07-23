@@ -1,0 +1,133 @@
+version: "3.9"
+
+services:
+  # ─── Infrastructure ───
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aiapp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aiapp_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-aiapp}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aiapp"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ─── Application Services ───
+  gateway:
+    build: ./services/gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - AUTH_SERVICE_URL=http://auth:8001
+      - DOCUMENT_SERVICE_URL=http://documents:8002
+      - CHAT_SERVICE_URL=http://chat:8003
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      auth:
+        condition: service_healthy
+      documents:
+        condition: service_healthy
+      chat:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  auth:
+    build: ./services/auth
+    ports:
+      - "8001:8001"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://aiapp:aiapp_secret@postgres:5432/aiapp
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production}
+      - EMAIL_HOST=${EMAIL_HOST:-smtp.gmail.com}
+      - EMAIL_PORT=${EMAIL_PORT:-587}
+      - EMAIL_HOST_USER=${EMAIL_HOST_USER:-}
+      - EMAIL_HOST_PASSWORD=${EMAIL_HOST_PASSWORD:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  documents:
+    build: ./services/documents
+    ports:
+      - "8002:8002"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://aiapp:aiapp_secret@postgres:5432/aiapp
+      - REDIS_URL=redis://redis:6379/0
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_EMBED_MODEL=${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+    volumes:
+      - uploads:/app/uploads
+      - faiss_indexes:/app/faiss_indexes
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  chat:
+    build: ./services/chat
+    ports:
+      - "8003:8003"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://aiapp:aiapp_secret@postgres:5432/aiapp
+      - REDIS_URL=redis://redis:6379/0
+      - DOCUMENT_SERVICE_URL=http://documents:8002
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:0.5b}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      documents:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - gateway
+
+volumes:
+  pgdata:
+  uploads:
+  faiss_indexes:

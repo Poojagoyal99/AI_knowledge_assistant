@@ -313,9 +313,7 @@ function FormattedAnswer({
   onGlobalSearch,
   onDismissGlobalSearch,
 }) {
-  if (!text) return null;
-
-  const isNotFound = /not found in uploaded pdfs/i.test(text);
+  const isNotFound = /not found in uploaded pdfs/i.test(text || "");
   const [selectionPopup, setSelectionPopup] = useState(null);
   const contentRef = useRef(null);
 
@@ -340,6 +338,8 @@ function FormattedAnswer({
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [selectionPopup]);
+
+  if (!text) return null;
 
   const handleMouseUp = (e) => {
     if (!onAddHighlight) return;
@@ -986,8 +986,20 @@ function AdminDashboard({ onBack, onLogout }) {
 }
 
 function App() {
-  const [authedUser, setAuthedUser] = useState(getUsername());
-  const [isAdmin, setIsAdmin] = useState(getIsAdmin());
+  // Clear auth only on first visit (new tab/window), not on refresh
+  useEffect(() => {
+    if (!sessionStorage.getItem("session_active")) {
+      clearAuth();
+      sessionStorage.setItem("session_active", "1");
+    }
+  }, []);
+
+  const [authedUser, setAuthedUser] = useState(() => {
+    return sessionStorage.getItem("session_active") ? getUsername() : "";
+  });
+  const [isAdmin, setIsAdmin] = useState(() => {
+    return sessionStorage.getItem("session_active") ? getIsAdmin() : false;
+  });
   const [showAdmin, setShowAdmin] = useState(false);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -1276,9 +1288,9 @@ function App() {
     setElapsedSeconds(0);
     setLoading(true);
 
+    let currentConversation = activeConversation;
     try {
       // Auto-create conversation if none is active
-      let currentConversation = activeConversation;
       if (!currentConversation) {
         try {
           const createRes = await fetch(`${API_BASE}/conversations/create/`, {
@@ -1365,6 +1377,44 @@ function App() {
       setElapsedSeconds(0);
       // Refresh conversations to pick up title change from first message
       fetchConversations();
+      // Reload messages to get server-assigned dbIds (needed for highlights to persist)
+      if (currentConversation) {
+        try {
+          const res = await fetch(`${API_BASE}/conversations/${currentConversation.id}/`, {
+            headers: authHeaders(),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const loadedMessages = (data.messages || []).map((m, i, arr) => {
+              const isOffer = m.role !== "user" && isGlobalSearchOffer(m.text);
+              // Find the preceding user message to reconstruct globalQuestion
+              let globalQ = "";
+              if (isOffer) {
+                for (let j = i - 1; j >= 0; j--) {
+                  if (arr[j].role === "user") {
+                    globalQ = arr[j].text || "";
+                    break;
+                  }
+                }
+              }
+              return {
+                id: m.id ? `db-${m.id}` : `loaded-${i}`,
+                dbId: m.id || null,
+                role: m.role === "user" ? "user" : "bot",
+                text: m.text,
+                sources: m.sources || [],
+                highlights: m.highlights || [],
+                streaming: false,
+                globalDismissed: !isOffer,
+                globalQuestion: globalQ,
+              };
+            });
+            setMessages(loadedMessages);
+          }
+        } catch {
+          // silent — messages still show, just without dbIds
+        }
+      }
     }
   };
 

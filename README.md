@@ -41,11 +41,29 @@ venv\Scripts\activate        # Windows
 # Install dependencies
 pip install -r ../requirements.txt
 
+# (Optional) Copy and edit the env file — works without it using defaults
+cp ../.env.example ../.env
+
 # Run migrations
 python manage.py migrate
 
 # Start the server
 python manage.py runserver
+```
+
+### Production
+
+```bash
+# Set required env vars (or edit backend/.env)
+# DEBUG=False
+# DJANGO_SECRET_KEY=<generate-a-real-key>
+# ALLOWED_HOSTS=yourdomain.com
+# CORS_ALLOWED_ORIGINS=https://yourdomain.com
+# EMAIL_HOST_USER=you@gmail.com
+# EMAIL_HOST_PASSWORD=<app-password>
+
+# Run with gunicorn instead of runserver
+gunicorn server.wsgi:application --bind 0.0.0.0:8000
 ```
 
 The backend API will be available at `http://localhost:8000/api/`.
@@ -81,3 +99,65 @@ The frontend will be available at `http://localhost:5173`.
 4. Open `http://localhost:5173` in your browser.
 5. Upload a PDF document.
 6. Ask questions about the uploaded document in the chat.
+
+---
+
+## Microservices Architecture (Alternative)
+
+The project also includes a full microservices version under `services/`.
+
+### Architecture
+
+```
+┌──────────┐     ┌──────────────┐     ┌──────────────┐
+│ Frontend │────▶│   Gateway    │────▶│ Auth Service │
+│  (React) │     │  (port 8080) │     │  (port 8001) │
+└──────────┘     └──────┬───────┘     └──────────────┘
+                        │
+              ┌─────────┼─────────┐
+              ▼                   ▼
+     ┌────────────────┐  ┌──────────────┐
+     │Document Service│  │ Chat Service │
+     │  (port 8002)   │  │  (port 8003) │
+     └────────────────┘  └──────────────┘
+              │                   │
+              ▼                   ▼
+     ┌────────────────┐  ┌──────────────┐
+     │  FAISS / Files │  │   Ollama     │
+     └────────────────┘  └──────────────┘
+```
+
+### Run with Docker Compose
+
+```bash
+# Make sure Ollama is running on your host
+ollama serve
+
+# Start all services
+docker-compose up --build
+
+# Frontend: http://localhost:5173
+# Gateway API: http://localhost:8080/api/
+```
+
+### Run Locally (without Docker)
+
+```bash
+# Install shared dependencies
+pip install -r services/requirements-dev.txt
+
+# Start all 4 services at once
+python run_services.py
+
+# In another terminal, start the frontend
+cd frontend && npm run dev
+```
+
+### Services
+
+| Service | Port | Responsibility |
+|---------|------|----------------|
+| Gateway | 8080 | Routing, auth validation, rate limiting |
+| Auth | 8001 | Registration, login, tokens, OTP, admin |
+| Documents | 8002 | Upload, parse, embed, FAISS vector search |
+| Chat | 8003 | Conversations, LLM queries, streaming, export |

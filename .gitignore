@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 venv/
 .env
+.env.docker
 
 # Database
 *.sqlite3
