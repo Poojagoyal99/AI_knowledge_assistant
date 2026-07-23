@@ -8,6 +8,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.core.mail import send_mail
 from django.conf import settings
 from django.db.models import Count
+from django.utils import timezone
 
 from .models import AuthToken, PasswordResetOTP, Conversation, Message
 
@@ -92,6 +93,10 @@ def login_view(request):
     AuthToken.objects.filter(user=user).delete()
     token = AuthToken(user=user)
     token.save()
+
+    # Update last_login timestamp
+    user.last_login = timezone.now()
+    user.save(update_fields=["last_login"])
 
     return JsonResponse({
         "token": token.key,

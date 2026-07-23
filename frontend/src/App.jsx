@@ -253,6 +253,41 @@ function extractText(children) {
   return "";
 }
 
+const SEARCH_TIPS = [
+  "💡 Did you know? The first search engine was called Archie, created in 1990.",
+  "🧠 Fun fact: Your brain processes information faster than any supercomputer!",
+  "📚 Tip: You can upload multiple PDFs and search across all of them.",
+  "🌍 Did you know? The internet has over 1.9 billion websites.",
+  "⚡ Fun fact: Light takes 8 minutes to travel from the Sun to Earth.",
+  "🎯 Tip: Try asking specific questions for more accurate answers.",
+  "🐝 Did you know? Honey never spoils — 3000-year-old honey is still edible!",
+  "🚀 Fun fact: NASA's internet speed is 91 Gbps!",
+  "📖 Tip: You can highlight text in answers to save important parts.",
+  "🧬 Did you know? DNA in your body could stretch to Pluto and back 17 times.",
+  "🎵 Fun fact: Music can help improve focus and productivity.",
+  "💻 Tip: Clear, well-formed questions give the best answers.",
+  "🌊 Did you know? More than 80% of the ocean is still unexplored.",
+  "🔬 Fun fact: There are more stars in the universe than grains of sand on Earth.",
+  "📝 Tip: You can export your chat history as a PDF for reference.",
+];
+
+function GlobalSearchTip() {
+  const [tipIndex, setTipIndex] = useState(() => Math.floor(Math.random() * SEARCH_TIPS.length));
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTipIndex((prev) => (prev + 1) % SEARCH_TIPS.length);
+    }, 3500);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <div className="global-search-tip">
+      <span className="tip-text">{SEARCH_TIPS[tipIndex]}</span>
+    </div>
+  );
+}
+
 function applyHighlightsToDOM(container, highlights) {
   if (!container || !highlights || highlights.length === 0) return;
 
@@ -268,37 +303,95 @@ function applyHighlightsToDOM(container, highlights) {
   const sorted = [...highlights].sort((a, b) => b.text.length - a.text.length);
 
   for (const h of sorted) {
+    // Collect all text nodes with their positions in the full concatenated text
     const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
-    const nodesToProcess = [];
+    const textNodes = [];
+    let fullText = "";
     let node;
     while ((node = walker.nextNode())) {
-      // Skip nodes inside code blocks or already-highlighted marks
       if (node.parentElement?.closest("pre, code, mark.highlight")) continue;
-      if (node.textContent.toLowerCase().includes(h.text.toLowerCase())) {
-        nodesToProcess.push(node);
-      }
+      textNodes.push({ node, start: fullText.length, length: node.textContent.length });
+      fullText += node.textContent;
     }
 
-    for (const textNode of nodesToProcess) {
-      const text = textNode.textContent;
-      const regex = new RegExp(`(${h.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi");
-      const parts = text.split(regex);
-      if (parts.length <= 1) continue;
+    if (!fullText) continue;
 
-      const fragment = document.createDocumentFragment();
-      for (const part of parts) {
-        if (regex.test(part)) {
-          regex.lastIndex = 0;
-          const mark = document.createElement("mark");
-          mark.className = `highlight highlight-${h.color || "yellow"}`;
-          mark.textContent = part;
-          fragment.appendChild(mark);
+    // Normalize the highlight text and build a normalized version of fullText for matching
+    const normalizedHighlight = h.text.replace(/\s+/g, " ").toLowerCase();
+    // Build a mapping: normalizedIndex -> originalIndex
+    const normalizedChars = [];
+    const origToNorm = [];
+    for (let i = 0; i < fullText.length; i++) {
+      const ch = fullText[i];
+      if (/\s/.test(ch)) {
+        // Collapse whitespace: only add a single space if the last normalized char wasn't a space
+        if (normalizedChars.length === 0 || normalizedChars[normalizedChars.length - 1] !== " ") {
+          normalizedChars.push(" ");
+          origToNorm.push(normalizedChars.length - 1);
         } else {
-          fragment.appendChild(document.createTextNode(part));
+          origToNorm.push(normalizedChars.length - 1);
         }
-        regex.lastIndex = 0;
+      } else {
+        normalizedChars.push(ch.toLowerCase());
+        origToNorm.push(normalizedChars.length - 1);
       }
-      textNode.parentNode.replaceChild(fragment, textNode);
+    }
+    const normalizedFull = normalizedChars.join("");
+
+    // Find the match in normalized text
+    const matchNormIndex = normalizedFull.indexOf(normalizedHighlight);
+    if (matchNormIndex === -1) continue;
+
+    // Map back to original indices
+    let matchOrigStart = -1;
+    let matchOrigEnd = -1;
+    for (let i = 0; i < origToNorm.length; i++) {
+      if (origToNorm[i] === matchNormIndex && matchOrigStart === -1) {
+        matchOrigStart = i;
+      }
+      if (origToNorm[i] === matchNormIndex + normalizedHighlight.length - 1) {
+        matchOrigEnd = i + 1;
+      }
+    }
+    if (matchOrigStart === -1 || matchOrigEnd === -1) continue;
+
+    const matchIndex = matchOrigStart;
+    const matchEnd = matchOrigEnd;
+
+    // Find which text nodes this match spans and highlight them
+    for (let i = textNodes.length - 1; i >= 0; i--) {
+      const tn = textNodes[i];
+      const tnEnd = tn.start + tn.length;
+
+      // Skip nodes that don't overlap with this match
+      if (tn.start >= matchEnd || tnEnd <= matchIndex) continue;
+
+      // Calculate the portion of this text node that's within the match
+      const highlightStart = Math.max(0, matchIndex - tn.start);
+      const highlightEnd = Math.min(tn.length, matchEnd - tn.start);
+      const nodeText = tn.node.textContent;
+
+      if (highlightStart === 0 && highlightEnd === tn.length) {
+        // Entire text node is within the match — wrap it
+        const mark = document.createElement("mark");
+        mark.className = `highlight highlight-${h.color || "yellow"}`;
+        mark.textContent = nodeText;
+        tn.node.parentNode.replaceChild(mark, tn.node);
+      } else {
+        // Partial match — split the text node
+        const fragment = document.createDocumentFragment();
+        if (highlightStart > 0) {
+          fragment.appendChild(document.createTextNode(nodeText.slice(0, highlightStart)));
+        }
+        const mark = document.createElement("mark");
+        mark.className = `highlight highlight-${h.color || "yellow"}`;
+        mark.textContent = nodeText.slice(highlightStart, highlightEnd);
+        fragment.appendChild(mark);
+        if (highlightEnd < tn.length) {
+          fragment.appendChild(document.createTextNode(nodeText.slice(highlightEnd)));
+        }
+        tn.node.parentNode.replaceChild(fragment, tn.node);
+      }
     }
   }
 }
@@ -319,7 +412,7 @@ function FormattedAnswer({
 
   // Apply highlights to DOM after render
   useEffect(() => {
-    if (contentRef.current) {
+    if (contentRef.current && highlights.length > 0) {
       applyHighlightsToDOM(contentRef.current, highlights);
     }
   }, [text, highlights]);
@@ -344,11 +437,13 @@ function FormattedAnswer({
   const handleMouseUp = (e) => {
     if (!onAddHighlight) return;
     const selection = window.getSelection();
-    const selectedText = selection?.toString().trim();
+    let selectedText = selection?.toString().trim();
     if (!selectedText || selectedText.length < 3) {
       setSelectionPopup(null);
       return;
     }
+    // Normalize whitespace (selections across elements may include newlines)
+    selectedText = selectedText.replace(/\s+/g, " ");
     // Check selection is within this component
     const container = e.currentTarget;
     if (!selection.anchorNode || !container.contains(selection.anchorNode)) {
@@ -360,7 +455,7 @@ function FormattedAnswer({
     const containerRect = container.getBoundingClientRect();
     setSelectionPopup({
       text: selectedText,
-      top: rect.top - containerRect.top - 40,
+      top: Math.max(0, rect.top - containerRect.top - 40),
       left: Math.min(
         Math.max(rect.left - containerRect.left + rect.width / 2, 60),
         containerRect.width - 60
@@ -457,6 +552,7 @@ function FormattedAnswer({
             <Icon name="close" size={15} />
             <span>No</span>
           </button>
+          {globalSearching && <GlobalSearchTip />}
         </div>
       )}
     </div>

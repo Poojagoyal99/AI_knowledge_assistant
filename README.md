@@ -6,7 +6,7 @@ A full-stack AI-powered knowledge assistant that lets you upload PDF documents a
 
 - **Frontend** — React + Vite (port 5173)
 - **Backend** — Django (port 8000) with a RAG pipeline (embeddings, FAISS vector store, chat memory)
-- **LLM** — Ollama running `qwen2.5:0.5b` locally (port 11434)
+- **LLM** — Ollama running `qwen2.5:3b` locally (port 11434)
 
 ## Prerequisites
 
@@ -21,10 +21,10 @@ A full-stack AI-powered knowledge assistant that lets you upload PDF documents a
 ollama serve
 
 # Pull the required model (in a separate terminal)
-ollama pull qwen2.5:0.5b
+ollama pull qwen2.5:3b
 ```
 
-> **Speed tip:** `qwen2.5:0.5b` is very small and free, so it is faster on normal laptops. For better answer quality, use a larger local model like `gemma:2b`, `gemma2:9b`, or `llama3:8b` by setting `OLLAMA_MODEL` before starting Django.
+> **Speed tip:** `qwen2.5:3b` offers good quality on most laptops. For even better answers, use `gemma2:9b` or `llama3:8b` by setting `OLLAMA_MODEL` before starting Django. For slower machines, `qwen2.5:0.5b` is lighter but less accurate.
 
 Ollama will run on `http://localhost:11434`.
 
@@ -93,7 +93,7 @@ The frontend will be available at `http://localhost:5173`.
 
 ## Usage
 
-1. Make sure Ollama is running with the `qwen2.5:0.5b` model.
+1. Make sure Ollama is running with the `qwen2.5:3b` model.
 2. Start the backend server.
 3. Start the frontend dev server.
 4. Open `http://localhost:5173` in your browser.

@@ -303,38 +303,10 @@ def _prepare_chat(query, user):
         results = _rerank_results(query, results, top_k)
         if not source_filter and not broad_generation and results:
             best_lexical_score = max(_lexical_score(query, result) for result in results)
-            # A score of 0 means no term appeared at all.
-            # A very low score (< 4) means the term appeared only as a
-            # passing mention (e.g. "C++" in a skills list) rather than the
-            # chunk actually being *about* that topic — treat as irrelevant.
-            min_relevance = 4 if len(query_terms) <= 2 else 2
+            # A score of 0 means no term appeared at all — discard.
+            min_relevance = 2 if len(query_terms) <= 2 else 1
             if query_terms and best_lexical_score < min_relevance:
                 results = []
-
-            # Even with a lexical match, check if the topic is substantively
-            # discussed vs merely listed.  For short queries (1-2 terms),
-            # require the term to appear multiple times across the top results
-            # or to have surrounding explanatory context.
-            if results and len(query_terms) <= 2:
-                combined = " ".join(results).lower()
-                term_pattern = re.escape(query_terms[0])
-                occurrences = len(re.findall(rf"(?<![a-z0-9]){term_pattern}(?![a-z0-9])", combined))
-                # If the term appears only 1-2 times in all top chunks,
-                # it's likely just listed (e.g. in a skills section) not discussed.
-                if occurrences <= 2:
-                    # Check if any chunk has >80 chars within 200 chars of the term mention
-                    has_substance = False
-                    for result in results:
-                        for match in re.finditer(rf"(?<![a-z0-9]){term_pattern}(?![a-z0-9])", result.lower()):
-                            surrounding = result[max(0, match.start() - 100):match.end() + 100]
-                            # If surrounding text is long enough it's likely explained
-                            if len(surrounding.split()) > 20:
-                                has_substance = True
-                                break
-                        if has_substance:
-                            break
-                    if not has_substance:
-                        results = []
 
     return {
         "ready": True,
@@ -374,6 +346,19 @@ def _get_user_data(user):
         if loaded_store and loaded_store.index.ntotal > 0:
             user_stores[uid]["store"] = loaded_store
             print(f"User {user.username}: Loaded FAISS index from disk ({loaded_store.index.ntotal} vectors).")
+            # Reconstruct pdf_status_map from indexed documents
+            upload_folder = _user_upload_folder(user)
+            indexed_sources = set()
+            for doc in loaded_store.documents:
+                if doc.startswith("[") and "]" in doc:
+                    indexed_sources.add(doc.split("]", 1)[0][1:])
+            for f in os.listdir(upload_folder):
+                ext = os.path.splitext(f)[1].lower()
+                if ext in SUPPORTED_EXTENSIONS:
+                    if f in indexed_sources:
+                        user_stores[uid]["pdf_status_map"][f] = {"has_text": True, "chunks": 0, "error": None}
+                    else:
+                        user_stores[uid]["pdf_status_map"][f] = {"has_text": False, "chunks": 0, "error": "No extractable text"}
     return user_stores[uid]
 
 

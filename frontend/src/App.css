@@ -2358,6 +2358,67 @@
   color: #fca5a5;
 }
 
+/* =============== GLOBAL SEARCH TIP =============== */
+.global-search-tip {
+  width: 100%;
+  margin-top: 10px;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border: none;
+  border-radius: 10px;
+  animation: tipFadeIn 0.4s ease;
+  box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+  position: relative;
+  overflow: hidden;
+}
+
+.global-search-tip::before {
+  content: "";
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 60%);
+  animation: shimmer 3s infinite linear;
+}
+
+@keyframes shimmer {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.global-search-tip .tip-text {
+  font-size: 13.5px;
+  color: #ffffff;
+  line-height: 1.6;
+  display: block;
+  animation: tipSlide 0.4s ease;
+  font-weight: 500;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  position: relative;
+  z-index: 1;
+}
+
+@keyframes tipFadeIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes tipSlide {
+  from { opacity: 0; transform: translateX(-10px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+[data-theme="dark"] .global-search-tip {
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+  box-shadow: 0 4px 15px rgba(79, 70, 229, 0.3);
+}
+
+[data-theme="dark"] .global-search-tip .tip-text {
+  color: #f1f5f9;
+}
+
 /* =============== TEXT HIGHLIGHTS =============== */
 .highlight-popup {
   position: absolute;
