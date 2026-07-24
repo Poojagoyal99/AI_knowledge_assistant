@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
@@ -1082,6 +1083,8 @@ function AdminDashboard({ onBack, onLogout }) {
 }
 
 function App() {
+  const navigate = useNavigate();
+
   // Clear auth only on first visit (new tab/window), not on refresh
   useEffect(() => {
     if (!sessionStorage.getItem("session_active")) {
@@ -1096,7 +1099,6 @@ function App() {
   const [isAdmin, setIsAdmin] = useState(() => {
     return sessionStorage.getItem("session_active") ? getIsAdmin() : false;
   });
-  const [showAdmin, setShowAdmin] = useState(false);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -1755,7 +1757,6 @@ function App() {
     clearAuth();
     setAuthedUser("");
     setIsAdmin(false);
-    setShowAdmin(false);
     setMessages([]);
     setUploadedFiles([]);
     setConversations([]);
@@ -1765,6 +1766,7 @@ function App() {
       recognitionRef.current = null;
     }
     setIsListening(false);
+    navigate("/login");
   };
 
   const toggleVoiceInput = useCallback(() => {
@@ -1866,27 +1868,7 @@ function App() {
     });
   }, [saveHighlightsToServer]);
 
-  if (!authedUser) {
-    return (
-      <AuthScreen
-        onAuth={(username) => {
-          setAuthedUser(username);
-          setIsAdmin(getIsAdmin());
-        }}
-      />
-    );
-  }
-
-  if (showAdmin && isAdmin) {
-    return (
-      <AdminDashboard
-        onBack={() => setShowAdmin(false)}
-        onLogout={handleLogout}
-      />
-    );
-  }
-
-  return (
+  const chatUI = (
     <div className="app-shell">
       <aside className="sidebar" aria-label="Document library">
         <div className="brand-block">
@@ -2112,7 +2094,7 @@ function App() {
             <Icon name="user" size={16} />
             <span>{authedUser}</span>
             {isAdmin && (
-              <button type="button" className="admin-button" onClick={() => setShowAdmin(true)}>
+              <button type="button" className="admin-button" onClick={() => navigate("/admin")}>
                 Admin Panel
               </button>
             )}
@@ -2306,6 +2288,31 @@ function App() {
         </div>
       )}
     </div>
+  );
+
+  return (
+    <Routes>
+      <Route path="/login" element={
+        authedUser ? <Navigate to="/chat" replace /> : (
+          <AuthScreen
+            onAuth={(username) => {
+              setAuthedUser(username);
+              setIsAdmin(getIsAdmin());
+              navigate("/chat");
+            }}
+          />
+        )
+      } />
+      <Route path="/admin" element={
+        !authedUser ? <Navigate to="/login" replace /> :
+        !isAdmin ? <Navigate to="/chat" replace /> :
+        <AdminDashboard onBack={() => navigate("/chat")} onLogout={handleLogout} />
+      } />
+      <Route path="/chat" element={
+        !authedUser ? <Navigate to="/login" replace /> : chatUI
+      } />
+      <Route path="*" element={<Navigate to={authedUser ? "/chat" : "/login"} replace />} />
+    </Routes>
   );
 }
 
