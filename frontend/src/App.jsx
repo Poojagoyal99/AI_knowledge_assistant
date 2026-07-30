@@ -1999,20 +1999,9 @@ function App() {
           </div>
         </div>
 
-        <button
-          type="button"
-          className={`document-row all-documents ${scopedFile ? "" : "is-active"}`}
-          onClick={() => setActiveFile("")}
-        >
-          <span className="document-icon">
-            <Icon name="search" />
-          </span>
-          <span className="document-copy">
-            <strong>All documents</strong>
-            <small>Search across the library</small>
-          </span>
-          <Icon name="chevron" size={16} />
-        </button>
+        <div className="sidebar-section-title">
+          <strong>Your Documents</strong>
+        </div>
 
         <div className="document-list" aria-live="polite">
           {documents.length ? (

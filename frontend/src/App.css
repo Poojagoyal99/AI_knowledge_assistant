@@ -402,6 +402,16 @@
   flex: 0 0 auto;
 }
 
+.sidebar-section-title {
+  padding: 8px 4px;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text);
+  border-bottom: 2px solid var(--border);
+  margin-bottom: 4px;
+}
+
 .document-icon {
   width: 34px;
   height: 34px;
